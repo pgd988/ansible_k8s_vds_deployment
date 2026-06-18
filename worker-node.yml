@@ -1,0 +1,21 @@
+---
+- name: Deploy Kubernetes Worker Node
+  hosts: workers
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Include common setup tasks
+      include_tasks: common-tasks.yml
+
+    - name: Read join command from local file
+      slurp:
+        src: join_command.sh
+      delegate_to: localhost
+      register: slurp_join_command
+      become: no
+
+    - name: Join the cluster
+      command: "{{ slurp_join_command['content'] | b64decode | trim }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+      become: yes

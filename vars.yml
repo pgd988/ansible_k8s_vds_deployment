@@ -1,0 +1,11 @@
+---
+# Version definitions
+containerd_version: "2.1.3"
+runc_version: "1.3.0"
+cni_version: "1.7.1"
+kubernetes_version: "1.33"
+calico_version: "3.29.5"
+
+# Kubernetes cluster configuration
+apiserver_advertise_address: "10.10.10.253"
+pod_network_cidr: "192.168.0.0/16"

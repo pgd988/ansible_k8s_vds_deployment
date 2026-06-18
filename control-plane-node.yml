@@ -1,0 +1,67 @@
+---
+- name: Deploy Kubernetes Control Plane Node
+  hosts: control_plane
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Include common setup tasks
+      include_tasks: common-tasks.yml
+
+    - name: Initialize the Kubernetes cluster using kubeadm
+      command: "kubeadm init --pod-network-cidr={{ pod_network_cidr }} --apiserver-advertise-address={{ apiserver_advertise_address }} --node-name master"
+      args:
+        creates: /etc/kubernetes/admin.conf
+      become: yes
+      register: kubeadm_init_output
+
+    - name: Print kubeadm init output
+      debug:
+        var: kubeadm_init_output.stdout_lines
+      when: kubeadm_init_output.changed
+
+    - name: Get kubeadm join command
+      command: kubeadm token create --print-join-command
+      become: yes
+      register: join_command_output
+      when: not kubeadm_init_output.changed
+
+    - name: Extract discovery token CA cert hash
+      shell: "openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'"
+      become: yes
+      register: ca_cert_hash_output
+
+    - name: Save CA cert hash to a local file
+      copy:
+        content: "{{ ca_cert_hash_output.stdout }}\n"
+        dest: ca_cert_hash.txt
+      delegate_to: localhost
+      become: no
+
+    - name: Set join command fact
+      set_fact:
+        kubernetes_join_command: "{{ join_command_output.stdout if join_command_output.changed else 'N/A, check logs or recreate token' }}"
+      when: not kubeadm_init_output.changed
+
+    - name: Parse join command from init output
+      set_fact:
+        kubernetes_join_command: "{{ item }}"
+      with_items: "{{ kubeadm_init_output.stdout_lines | default([]) }}"
+      when: kubeadm_init_output.changed and 'kubeadm join' in item
+
+    - name: Save join command to a local file
+      copy:
+        content: "{{ kubernetes_join_command }}\n"
+        dest: join_command.sh
+      delegate_to: localhost
+      become: no
+      ignore_errors: yes
+
+    - name: Install Tigera Operator (Calico)
+      command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf create -f https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/tigera-operator.yaml"
+      become: yes
+      ignore_errors: yes
+
+    - name: Install Calico Custom Resources
+      command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/custom-resources.yaml"
+      become: yes
+      ignore_errors: yes
