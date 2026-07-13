@@ -1,11 +1,39 @@
 ---
-# Version definitions
-containerd_version: "2.1.3"
-runc_version: "1.3.0"
-cni_version: "1.7.1"
-kubernetes_version: "1.33"
-calico_version: "3.29.5"
+# RKE2 (Rancher Kubernetes Engine 2) configuration
+rke2_channel: "stable"
+rke2_cni: "cilium"
+rke2_cilium_wireguard: true
 
 # Kubernetes cluster configuration
 apiserver_advertise_address: "10.10.10.253"
-pod_network_cidr: "192.168.0.0/16"
+pod_network_cidr: "10.42.0.0/16"
+service_network_cidr: "10.43.0.0/16"
+cluster_domain: "cluster.local"
+
+# Rancher Management Server UI toggle and configuration
+install_rancher_server: true
+rancher_hostname: "rancher.10.10.10.253.nip.io"
+rancher_bootstrap_password: "adminPassword123!"
+rancher_chart_version: "2.10.1"
+cert_manager_version: "v1.16.2"
+
+# Cloudflare Tunnel & Ingress Routing Configuration
+install_cloudflare_tunnel: true
+cloudflare_k8s_namespace: "kube-system"
+cloudflare_domain_name: "yourcompany.com"
+cloudflare_account_id: "your-cf-account-id"
+cloudflare_api_token: "your-cf-api-token"
+cloudflare_tunnel_name: "prod-rke2-tunnel"
+cloudflare_tunnel_token: "" # Optional: populate if tunnel is already created outside API
+cloudflare_replica_count: 3
+cloudflare_cname_records:
+  - "api"
+  - "rancher"
+cloudflare_ingress_routes:
+  - hostname: "api.{{ cloudflare_domain_name }}"
+    service: "http://my-api-service.default.svc.cluster.local:80"
+  - hostname: "rancher.{{ cloudflare_domain_name }}"
+    service: "https://rancher.cattle-system.svc.cluster.local:443"
+    originRequest:
+      noTLSVerify: true
+  - service: "http_status:404"

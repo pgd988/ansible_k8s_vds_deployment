@@ -1,0 +1,183 @@
+---
+- name: Check if Helm binary is present
+  stat:
+    path: /usr/local/bin/helm
+  register: helm_bin_stat
+  become: yes
+
+- name: Download official Helm installer script when needed
+  get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get_helm.sh
+    mode: '0700'
+  become: yes
+  when: not helm_bin_stat.stat.exists
+
+- name: Install Helm when needed
+  command: /tmp/get_helm.sh
+  args:
+    creates: /usr/local/bin/helm
+  become: yes
+  when: not helm_bin_stat.stat.exists
+
+- block:
+    - name: Query existing Cloudflare Tunnel by name
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel?name={{ cloudflare_tunnel_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        return_content: yes
+      register: cf_tunnel_check
+      become: no
+
+    - name: Create Cloudflare Tunnel when it does not exist
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ cloudflare_tunnel_name }}"
+          config_src: "cloudflare"
+        status_code: [200, 201]
+        return_content: yes
+      register: cf_tunnel_created
+      when: cf_tunnel_check.json.result | length == 0
+      become: no
+
+    - name: Set active Cloudflare Tunnel ID fact
+      set_fact:
+        cf_tunnel_id: "{{ cf_tunnel_check.json.result[0].id if (cf_tunnel_check.json.result | length > 0) else cf_tunnel_created.json.result.id }}"
+
+    - name: Retrieve Cloudflare Tunnel Token via API
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cf_tunnel_id }}/token"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        return_content: yes
+      register: cf_tunnel_token_resp
+      become: no
+
+    - name: Set active tunnel token fact from API response
+      set_fact:
+        active_tunnel_token: "{{ cf_tunnel_token_resp.json.result }}"
+
+    - name: Configure Cloudflare Tunnel Ingress Routing Configurations
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_account_id }}/cfd_tunnel/{{ cf_tunnel_id }}/configurations"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          config:
+            ingress: "{{ cloudflare_ingress_routes }}"
+        status_code: [200, 201]
+      become: no
+
+    - name: Retrieve Cloudflare Zone ID for domain
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones?name={{ cloudflare_domain_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        return_content: yes
+      register: cf_zone_resp
+      become: no
+
+    - name: Set Cloudflare Zone ID fact
+      set_fact:
+        cf_zone_id: "{{ cf_zone_resp.json.result[0].id }}"
+      when: cf_zone_resp.json.result | length > 0
+
+    - name: Query existing DNS CNAME records for tunnel
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records?type=CNAME&name={{ item }}.{{ cloudflare_domain_name }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        return_content: yes
+      loop: "{{ cloudflare_cname_records }}"
+      register: cf_dns_checks
+      when: cf_zone_resp.json.result | length > 0
+      become: no
+
+    - name: Create DNS CNAME record pointing to Cloudflare Tunnel when not existing
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "CNAME"
+          name: "{{ item.item }}"
+          content: "{{ cf_tunnel_id }}.cfargotunnel.com"
+          proxied: true
+          ttl: 1
+        status_code: [200, 201]
+      loop: "{{ cf_dns_checks.results }}"
+      when: cf_zone_resp.json.result | length > 0 and item.json.result | length == 0
+      become: no
+
+    - name: Update DNS CNAME record pointing to Cloudflare Tunnel when existing
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ cf_zone_id }}/dns_records/{{ item.json.result[0].id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: "CNAME"
+          name: "{{ item.item }}"
+          content: "{{ cf_tunnel_id }}.cfargotunnel.com"
+          proxied: true
+          ttl: 1
+        status_code: [200, 201]
+      loop: "{{ cf_dns_checks.results }}"
+      when: cf_zone_resp.json.result | length > 0 and item.json.result | length > 0
+      become: no
+
+  when: cloudflare_tunnel_token | default('') | length == 0
+
+- name: Set active tunnel token fact from provided static token
+  set_fact:
+    active_tunnel_token: "{{ cloudflare_tunnel_token }}"
+  when: cloudflare_tunnel_token | default('') | length > 0
+
+- name: Add helmforge Helm repository
+  command: helm repo add helmforge https://repo.helmforge.dev
+  become: yes
+
+- name: Update Helm repositories
+  command: helm repo update helmforge
+  become: yes
+
+- name: Deploy cloudflared via Helm with active tunnel token
+  command: >
+    helm upgrade --install cloudflared helmforge/cloudflared
+    --namespace {{ cloudflare_k8s_namespace }}
+    --create-namespace
+    --set tunnel.quickTunnel.enabled=false
+    --set tunnel.token={{ active_tunnel_token }}
+    --set replicaCount={{ cloudflare_replica_count }}
+    --set resources.limits.cpu=500m
+    --set resources.limits.memory=256Mi
+    --set resources.requests.cpu=100m
+    --set resources.requests.memory=128Mi
+  become: yes
+
+- name: Wait for cloudflared deployment rollout to complete
+  command: kubectl rollout status deployment/cloudflared -n {{ cloudflare_k8s_namespace }} --timeout=300s
+  become: yes

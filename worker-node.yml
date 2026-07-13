@@ -1,5 +1,5 @@
 ---
-- name: Deploy Kubernetes Worker Node
+- name: Deploy RKE2 Kubernetes Worker Node
   hosts: workers
   vars_files:
     - vars.yml
@@ -7,15 +7,34 @@
     - name: Include common setup tasks
       include_tasks: common-tasks.yml
 
-    - name: Read join command from local file
+    - name: Read RKE2 node token from local file
       slurp:
-        src: join_command.sh
+        src: rke2_node_token.txt
       delegate_to: localhost
-      register: slurp_join_command
+      register: slurp_rke2_token
       become: no
 
-    - name: Join the cluster
-      command: "{{ slurp_join_command['content'] | b64decode | trim }}"
+    - name: Create RKE2 config.yaml for worker node
+      copy:
+        dest: /etc/rancher/rke2/config.yaml
+        content: |
+          server: "https://{{ apiserver_advertise_address }}:9345"
+          token: "{{ slurp_rke2_token['content'] | b64decode | trim }}"
+      become: yes
+
+    - name: Install RKE2 Agent
+      environment:
+        INSTALL_RKE2_TYPE: agent
+        INSTALL_RKE2_CHANNEL: "{{ rke2_channel }}"
+      command: /usr/local/bin/rke2-install.sh
       args:
-        creates: /etc/kubernetes/kubelet.conf
+        creates: /etc/systemd/system/rke2-agent.service
+      become: yes
+
+    - name: Enable and start rke2-agent service
+      systemd:
+        name: rke2-agent
+        daemon_reload: yes
+        enabled: yes
+        state: started
       become: yes

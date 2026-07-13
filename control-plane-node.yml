@@ -1,5 +1,5 @@
 ---
-- name: Deploy Kubernetes Control Plane Node
+- name: Deploy RKE2 Kubernetes Control Plane Node
   hosts: control_plane
   vars_files:
     - vars.yml
@@ -7,61 +7,147 @@
     - name: Include common setup tasks
       include_tasks: common-tasks.yml
 
-    - name: Initialize the Kubernetes cluster using kubeadm
-      command: "kubeadm init --pod-network-cidr={{ pod_network_cidr }} --apiserver-advertise-address={{ apiserver_advertise_address }} --node-name master"
+    - name: Create RKE2 server manifests directory
+      file:
+        path: /var/lib/rancher/rke2/server/manifests
+        state: directory
+        mode: '0755'
+      become: yes
+
+    - name: Configure Cilium CNI with WireGuard encryption via HelmChartConfig
+      copy:
+        dest: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+        content: |
+          ---
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChartConfig
+          metadata:
+            name: rke2-cilium
+            namespace: kube-system
+          spec:
+            valuesContent: |-
+              encryption:
+                enabled: true
+                type: wireguard
+      become: yes
+      when: rke2_cni == 'cilium' and rke2_cilium_wireguard | default(false) | bool
+
+    - name: Create RKE2 config.yaml for control plane
+      copy:
+        dest: /etc/rancher/rke2/config.yaml
+        content: |
+          write-kubeconfig-mode: "0644"
+          cni: "{{ rke2_cni }}"
+          bind-address: "{{ apiserver_advertise_address }}"
+          advertise-address: "{{ apiserver_advertise_address }}"
+          cluster-cidr: "{{ pod_network_cidr }}"
+          service-cidr: "{{ service_network_cidr }}"
+          cluster-domain: "{{ cluster_domain }}"
+      become: yes
+
+    - name: Install RKE2 Server
+      environment:
+        INSTALL_RKE2_TYPE: server
+        INSTALL_RKE2_CHANNEL: "{{ rke2_channel }}"
+      command: /usr/local/bin/rke2-install.sh
       args:
-        creates: /etc/kubernetes/admin.conf
+        creates: /etc/systemd/system/rke2-server.service
       become: yes
-      register: kubeadm_init_output
 
-    - name: Print kubeadm init output
-      debug:
-        var: kubeadm_init_output.stdout_lines
-      when: kubeadm_init_output.changed
-
-    - name: Get kubeadm join command
-      command: kubeadm token create --print-join-command
+    - name: Enable and start rke2-server service
+      systemd:
+        name: rke2-server
+        daemon_reload: yes
+        enabled: yes
+        state: started
       become: yes
-      register: join_command_output
-      when: not kubeadm_init_output.changed
 
-    - name: Extract discovery token CA cert hash
-      shell: "openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'"
+    - name: Wait for RKE2 node-token file to be generated
+      wait_for:
+        path: /var/lib/rancher/rke2/server/node-token
+        timeout: 300
       become: yes
-      register: ca_cert_hash_output
 
-    - name: Save CA cert hash to a local file
+    - name: Wait for RKE2 kubeconfig to be generated
+      wait_for:
+        path: /etc/rancher/rke2/rke2.yaml
+        timeout: 300
+      become: yes
+
+    - name: Create symlink for kubectl
+      file:
+        src: /var/lib/rancher/rke2/bin/kubectl
+        dest: /usr/local/bin/kubectl
+        state: link
+      become: yes
+
+    - name: Create symlink for crictl
+      file:
+        src: /var/lib/rancher/rke2/bin/crictl
+        dest: /usr/local/bin/crictl
+        state: link
+      become: yes
+
+    - name: Create .kube directory for ubuntu user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      become: yes
+
+    - name: Copy RKE2 kubeconfig to ubuntu user home
       copy:
-        content: "{{ ca_cert_hash_output.stdout }}\n"
-        dest: ca_cert_hash.txt
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      become: yes
+
+    - name: Create .kube directory for root user
+      file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: yes
+
+    - name: Copy RKE2 kubeconfig to root user home
+      copy:
+        src: /etc/rancher/rke2/rke2.yaml
+        dest: /root/.kube/config
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0600'
+      become: yes
+
+    - name: Configure crictl runtime endpoint
+      command: crictl config runtime-endpoint unix:///run/k3s/containerd/containerd.sock
+      become: yes
+      ignore_errors: yes
+
+    - name: Read RKE2 node token
+      slurp:
+        src: /var/lib/rancher/rke2/server/node-token
+      register: rke2_token_slurp
+      become: yes
+
+    - name: Save RKE2 node token locally for workers
+      copy:
+        content: "{{ rke2_token_slurp.content | b64decode | trim }}"
+        dest: rke2_node_token.txt
       delegate_to: localhost
       become: no
 
-    - name: Set join command fact
-      set_fact:
-        kubernetes_join_command: "{{ join_command_output.stdout if join_command_output.changed else 'N/A, check logs or recreate token' }}"
-      when: not kubeadm_init_output.changed
+    - name: Include Rancher Management Server deployment tasks
+      include_tasks: rancher-server.yml
+      when: install_rancher_server | default(true) | bool
 
-    - name: Parse join command from init output
-      set_fact:
-        kubernetes_join_command: "{{ item }}"
-      with_items: "{{ kubeadm_init_output.stdout_lines | default([]) }}"
-      when: kubeadm_init_output.changed and 'kubeadm join' in item
-
-    - name: Save join command to a local file
-      copy:
-        content: "{{ kubernetes_join_command }}\n"
-        dest: join_command.sh
-      delegate_to: localhost
-      become: no
-      ignore_errors: yes
-
-    - name: Install Tigera Operator (Calico)
-      command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf create -f https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/tigera-operator.yaml"
-      become: yes
-      ignore_errors: yes
-
-    - name: Install Calico Custom Resources
-      command: "kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/custom-resources.yaml"
-      become: yes
-      ignore_errors: yes
+    - name: Include Cloudflare Tunnel and Ingress Routing tasks
+      include_tasks: cloudflare-tunnel.yml
+      when: install_cloudflare_tunnel | default(true) | bool

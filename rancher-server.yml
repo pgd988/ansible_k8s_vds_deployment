@@ -1,0 +1,56 @@
+---
+- name: Download official Helm installer script
+  get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get_helm.sh
+    mode: '0700'
+  become: yes
+
+- name: Install Helm
+  command: /tmp/get_helm.sh
+  args:
+    creates: /usr/local/bin/helm
+  become: yes
+
+- name: Install cert-manager
+  command: "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+  become: yes
+
+- name: Wait for cert-manager namespace to be created
+  command: kubectl get namespace cert-manager
+  register: cert_manager_ns
+  until: cert_manager_ns.rc == 0
+  retries: 30
+  delay: 5
+  become: yes
+
+- name: Wait for cert-manager pods to be ready
+  command: kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=300s
+  become: yes
+
+- name: Add Rancher stable Helm repository
+  command: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+  become: yes
+
+- name: Update Helm repositories
+  command: helm repo update
+  become: yes
+
+- name: Create cattle-system namespace
+  shell: kubectl create namespace cattle-system --dry-run=client -o yaml | kubectl apply -f -
+  become: yes
+
+- name: Install Rancher Management Server via Helm
+  command: >
+    helm upgrade --install rancher rancher-stable/rancher
+    --namespace cattle-system
+    --create-namespace
+    --set hostname={{ rancher_hostname }}
+    --set bootstrapPassword={{ rancher_bootstrap_password }}
+    --set replicas=1
+    --version {{ rancher_chart_version }}
+  become: yes
+
+- name: Wait for Rancher deployment rollout to complete
+  command: kubectl rollout status deployment/rancher -n cattle-system --timeout=600s
+  become: yes
