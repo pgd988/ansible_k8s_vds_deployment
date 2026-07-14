@@ -1,13 +1,14 @@
 # Bare-Metal RKE2 & Rancher Management Cluster Deployment with Ansible
 
-These Ansible playbooks automate the deployment of a production-grade, bare-metal Kubernetes cluster using **RKE2 (Rancher Kubernetes Engine 2)** on Ubuntu VDS/VMs. By default, the cluster is configured with **Cilium CNI and WireGuard node-to-node encryption**, deploys the **Rancher Management Server UI** via Helm, and automates ingress routing via **Cloudflare Tunnel (`cloudflared`)**.
+These Ansible playbooks automate the deployment of a production-grade, bare-metal Kubernetes cluster using **RKE2 (Rancher Kubernetes Engine 2)** on Ubuntu VDS/VMs. By default, the cluster is configured with **Cilium CNI and WireGuard node-to-node encryption**, deploys the **Rancher Management Server UI** via Helm, and offers flexible external ingress options via **MetalLB (`IPAddressPool` + `L2Advertisement`)** and/or **Cloudflare Tunnel (`cloudflared`)**.
 
 ## Key Features
 
 - **RKE2 (Rancher Kubernetes Engine 2)**: Rancher's CNCF-certified, FIPS-compliant Kubernetes distribution designed for data center and bare-metal environments (`rke2-server` on master nodes, `rke2-agent` on worker nodes).
 - **Cilium CNI + WireGuard Encryption**: Out-of-the-box high performance eBPF networking (`rke2_cni: "cilium"`) configured with transparent node-to-node WireGuard encryption via `HelmChartConfig`.
 - **Rancher Management Server UI**: Optional automated deployment of `cert-manager` and the multi-cluster Rancher Web UI dashboard (`rancher/rancher` chart in `cattle-system`). Toggled via `install_rancher_server: true/false`.
-- **Cloudflare Tunnel (`cloudflared`)**: Automated Zero Trust ingress traffic tunneling using the `helmforge/cloudflared` Helm chart and native Cloudflare v4 REST API automation (`cloudflare-tunnel.yml`). Automatically configures ingress routing, creates DNS CNAME records, and deploys high-availability `cloudflared` replicas to `kube-system`.
+- **MetalLB Bare-Metal LoadBalancer**: Out-of-the-box Layer 2 LoadBalancer IP assignment (`metallb.yml`). Automatically deploys MetalLB via Helm, creates an `IPAddressPool` (`metallb_ip_range`), and advertises VIPs across your VDS/bare-metal subnet for any `LoadBalancer` service. Toggled via `install_metallb: true/false`.
+- **Cloudflare Tunnel (`cloudflared`)**: Alternative or complementary Zero Trust ingress traffic tunneling using the `helmforge/cloudflared` Helm chart and native Cloudflare v4 REST API automation (`cloudflare-tunnel.yml`). Automatically configures ingress routing, creates DNS CNAME records, and deploys high-availability `cloudflared` replicas to `kube-system`. Toggled via `install_cloudflare_tunnel: true/false`.
 
 ## Prerequisites
 
@@ -35,11 +36,19 @@ These Ansible playbooks automate the deployment of a production-grade, bare-meta
 
    # Rancher Management Server UI toggle and configuration
    install_rancher_server: true
-   rancher_hostname: "rancher.yourcompany.com"
+   rancher_hostname: "rancher.10.10.10.253.nip.io"
    rancher_bootstrap_password: "adminPassword123!"
 
-   # Cloudflare Tunnel & Ingress Routing Configuration
-   install_cloudflare_tunnel: true
+   # Ingress & External Traffic Controller Selection
+   # Toggle between MetalLB (Bare-Metal L2 LoadBalancer) and Cloudflare Tunnel (Zero-Trust Edge)
+   install_metallb: true
+   install_cloudflare_tunnel: false
+
+   # MetalLB LoadBalancer Configuration
+   metallb_chart_version: "0.14.8"
+   metallb_ip_range: "10.10.10.240-10.10.10.250"
+
+   # Cloudflare Tunnel & Ingress Routing Configuration (Used when install_cloudflare_tunnel: true)
    cloudflare_k8s_namespace: "kube-system"
    cloudflare_domain_name: "yourcompany.com"
    cloudflare_account_id: "your-cf-account-id"
@@ -66,7 +75,7 @@ These Ansible playbooks automate the deployment of a production-grade, bare-meta
 
 ### Option 1: Full Automated Deployment (Recommended)
 
-Run the master orchestration playbook (`site.yml`) to initialize the control plane node, join all worker nodes, deploy the Rancher Management Server, and set up Cloudflare Tunnel ingress routing:
+Run the master orchestration playbook (`site.yml`) to initialize the control plane node, join all worker nodes, deploy the Rancher Management Server, and set up your selected ingress controller (`MetalLB` or `Cloudflare Tunnel`):
 
 ```bash
 ansible-playbook -i inventory.ini site.yml
@@ -76,7 +85,7 @@ ansible-playbook -i inventory.ini site.yml
 
 ### Option 2: Step-by-Step Deployment
 
-#### 1. Configure Control Plane, RKE2 Server, Rancher & Cloudflare Tunnel
+#### 1. Configure Control Plane, RKE2 Server, Rancher & Ingress Controllers
 
 ```bash
 ansible-playbook -i inventory.ini control-plane-node.yml
@@ -89,7 +98,8 @@ This tasks:
 - Extracts the RKE2 cluster node token to `rke2_node_token.txt` locally.
 - Configures `kubectl` and `crictl` symlinks on the master node (`/usr/local/bin/kubectl`).
 - Deploys `cert-manager` and the Rancher Management Server (when `install_rancher_server: true`).
-- Deploys Cloudflare Tunnel API routes, DNS CNAMEs, and `cloudflared` Helm chart (when `install_cloudflare_tunnel: true`).
+- Deploys MetalLB L2 `IPAddressPool` (`metallb_ip_range`) and `L2Advertisement` via `metallb.yml` (when `install_metallb: true`).
+- Deploys Cloudflare Tunnel API routes, DNS CNAMEs, and `cloudflared` Helm chart via `cloudflare-tunnel.yml` (when `install_cloudflare_tunnel: true`).
 
 #### 2. Join Worker Nodes
 
@@ -104,7 +114,43 @@ This tasks:
 
 ---
 
-## Accessing the Cluster, Rancher UI & Cloudflare Tunnel
+## Toggling External Traffic Controllers (MetalLB vs Cloudflare Tunnel)
+
+You can easily switch how external traffic enters your Kubernetes cluster by adjusting two variables inside `vars.yml`:
+
+### 1. Bare-Metal Local/VDS LoadBalancer (MetalLB)
+Best suited when your VDS boxes or bare-metal servers are on a private/public network with a pool of available IP addresses that can be assigned directly to services.
+```yaml
+install_metallb: true
+install_cloudflare_tunnel: false
+metallb_ip_range: "10.10.10.240-10.10.10.250" # Set to your subnet's available IP pool
+```
+Check assigned VIPs using `kubectl`:
+```bash
+kubectl get svc -A -o wide | grep LoadBalancer
+```
+
+### 2. Zero-Trust Edge Tunnel (Cloudflare Tunnel)
+Best suited when your servers are behind NAT or firewalls, or when you want Cloudflare to handle SSL termination, DDoS protection, and routing without exposing public inbound ports.
+```yaml
+install_metallb: false
+install_cloudflare_tunnel: true
+```
+Check `cloudflared` pod health using `kubectl`:
+```bash
+kubectl get pods -n kube-system -l app.kubernetes.io/name=cloudflared
+```
+
+### 3. Both Simultaneously
+If you require internal local LoadBalancer VIPs inside your VDS subnet while simultaneously routing public traffic through Cloudflare:
+```yaml
+install_metallb: true
+install_cloudflare_tunnel: true
+```
+
+---
+
+## Accessing the Cluster & Rancher UI
 
 ### Kubernetes CLI Access (`kubectl`)
 
@@ -115,28 +161,28 @@ kubectl get nodes -o wide
 kubectl get pods -n kube-system
 ```
 
-### Rancher Management UI & Cloudflare Ingress Access
+### Rancher Management UI Access
 
-When `install_rancher_server: true` and `install_cloudflare_tunnel: true` are enabled, check that all pods in `cattle-system` and `kube-system` are `Running`:
+When `install_rancher_server: true` is enabled, check that all pods in `cattle-system` are `Running`:
 
 ```bash
 kubectl get pods -n cattle-system
-kubectl get pods -n kube-system -l app.kubernetes.io/name=cloudflared
 ```
 
-Access the Rancher web interface securely via your configured public Cloudflare hostname (no open firewall ports required):
-- **URL**: `https://rancher.<cloudflare_domain_name>`
+Access the Rancher web interface securely via your configured hostname:
+- **URL**: `https://<rancher_hostname>`
 - **Login Password**: The password defined in `rancher_bootstrap_password` inside `vars.yml`.
 
 ---
 
 ## Customizing Architecture & Toggles
 
-### Pure RKE2 Mode (No Rancher UI or Cloudflare)
-If you need only the underlying RKE2 + Cilium + WireGuard Kubernetes cluster without installing the Rancher UI chart or Cloudflare Tunnel, set the toggles to `false` in `vars.yml`:
+### Pure RKE2 Mode (No Rancher UI, MetalLB, or Cloudflare)
+If you need only the underlying RKE2 + Cilium + WireGuard Kubernetes cluster without any add-ons, set all toggles to `false` in `vars.yml`:
 
 ```yaml
 install_rancher_server: false
+install_metallb: false
 install_cloudflare_tunnel: false
 ```
 

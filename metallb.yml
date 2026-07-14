@@ -1,0 +1,77 @@
+---
+- name: Check if Helm binary is present
+  stat:
+    path: /usr/local/bin/helm
+  register: helm_bin_stat
+  become: yes
+
+- name: Download official Helm installer script when needed
+  get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get_helm.sh
+    mode: '0700'
+  become: yes
+  when: not helm_bin_stat.stat.exists
+
+- name: Install Helm when needed
+  command: /tmp/get_helm.sh
+  args:
+    creates: /usr/local/bin/helm
+  become: yes
+  when: not helm_bin_stat.stat.exists
+
+- name: Add MetalLB Helm repository
+  command: helm repo add metallb https://metallb.github.io/metallb
+  become: yes
+
+- name: Update MetalLB Helm repository
+  command: helm repo update metallb
+  become: yes
+
+- name: Install or Upgrade MetalLB via Helm
+  command: >
+    helm upgrade --install metallb metallb/metallb
+    --namespace metallb-system
+    --create-namespace
+    --version {{ metallb_chart_version }}
+  become: yes
+
+- name: Wait for MetalLB pods to be ready
+  command: kubectl wait --for=condition=Ready pods --all -n metallb-system --timeout=300s
+  become: yes
+
+- name: Wait for MetalLB CRDs to be established
+  command: kubectl get crd ipaddresspools.metallb.io l2advertisements.metallb.io
+  register: metallb_crds
+  until: metallb_crds.rc == 0
+  retries: 30
+  delay: 5
+  become: yes
+
+- name: Generate MetalLB IPAddressPool and L2Advertisement configuration file
+  copy:
+    dest: /tmp/metallb-config.yaml
+    content: |
+      ---
+      apiVersion: metallb.io/v1beta1
+      kind: IPAddressPool
+      metadata:
+        name: default-pool
+        namespace: metallb-system
+      spec:
+        addresses:
+          - "{{ metallb_ip_range }}"
+      ---
+      apiVersion: metallb.io/v1beta1
+      kind: L2Advertisement
+      metadata:
+        name: default-l2
+        namespace: metallb-system
+      spec:
+        ipAddressPools:
+          - default-pool
+  become: yes
+
+- name: Apply MetalLB IPAddressPool and L2Advertisement configuration to cluster
+  command: kubectl apply -f /tmp/metallb-config.yaml
+  become: yes

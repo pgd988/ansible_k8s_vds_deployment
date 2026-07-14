@@ -17,8 +17,16 @@ rancher_bootstrap_password: "adminPassword123!"
 rancher_chart_version: "2.10.1"
 cert_manager_version: "v1.16.2"
 
-# Cloudflare Tunnel & Ingress Routing Configuration
-install_cloudflare_tunnel: true
+# Ingress & External Traffic Controller Selection
+# Toggle between MetalLB (Bare-Metal L2 LoadBalancer) and Cloudflare Tunnel (Zero-Trust Edge)
+install_metallb: true
+install_cloudflare_tunnel: false
+
+# MetalLB LoadBalancer Configuration
+metallb_chart_version: "0.14.8"
+metallb_ip_range: "10.10.10.240-10.10.10.250"
+
+# Cloudflare Tunnel & Ingress Routing Configuration (Used when install_cloudflare_tunnel: true)
 cloudflare_k8s_namespace: "kube-system"
 cloudflare_domain_name: "yourcompany.com"
 cloudflare_account_id: "your-cf-account-id"

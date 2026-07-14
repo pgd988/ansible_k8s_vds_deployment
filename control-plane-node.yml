@@ -150,4 +150,8 @@
 
     - name: Include Cloudflare Tunnel and Ingress Routing tasks
       include_tasks: cloudflare-tunnel.yml
-      when: install_cloudflare_tunnel | default(true) | bool
+      when: install_cloudflare_tunnel | default(false) | bool
+
+    - name: Include MetalLB Bare-Metal LoadBalancer deployment tasks
+      include_tasks: metallb.yml
+      when: install_metallb | default(false) | bool
